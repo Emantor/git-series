@@ -48,6 +48,9 @@ quick_error! {
             cause(err)
             display("{}", err)
         }
+        NoActiveSeries {}      // SHEAD (or the thing it references) doesn't exist
+        SeriesNotFound {}      // We tried to use a series which doesn't exist
+        UninitialisedSeries {} // The active series currently has no commits
     }
 }
 
@@ -103,14 +106,20 @@ fn peel_to_commit(r: Reference) -> Result<Commit> {
     Ok(try!(try!(r.peel(ObjectType::Commit)).into_commit().map_err(|obj| format!("Internal error: expected a commit: {}", obj.id()))))
 }
 
+/// Find the commit corresponding to the series specified at the command line (as "[series]"), or
+/// the active series if none was specified.
 fn series_commit<'a>(repo: &'a Repository, m: &ArgMatches) -> Result<Commit<'a>> {
     use git2::ErrorCode::NotFound;
-    let series_ref = m.value_of("series").map(|x| String::from("git-series/") + x)
-        .unwrap_or(String::from("SHEAD"));
+    let series_ref = match m.value_of("series") {
+        Some(x) =>
+            repo.find_reference(&(String::from("refs/heads/git-series/") + x))
+            .map_err(|e| if e.code() == NotFound { Error::SeriesNotFound } else { e.into() })?,
+        None =>
+            repo.find_reference("SHEAD")
+            .map_err(|e| if e.code() == NotFound { Error::NoActiveSeries } else { e.into() })?,
+    };
     peel_to_commit(
-        repo.find_reference(&series_ref)
-        .map_err(|e| if e.code() == NotFound { Error::NoActiveSeries } else { e.into() })?
-        .resolve()
+        series_ref.resolve()
         .map_err(|e| if e.code() == NotFound { Error::UninitialisedSeries } else { e.into() })?
     )
 }
@@ -1450,7 +1459,7 @@ fn format(out: &mut Output, repo: &Repository, m: &ArgMatches) -> Result<()> {
     let to_stdout = m.is_present("stdout");
     let no_from = m.is_present("no-from");
 
-    let shead_commit = try!(peel_to_commit(try!(try!(repo.find_reference(SHEAD_REF)).resolve())));
+    let shead_commit = series_commit(repo, m)?;
     let stree = try!(shead_commit.tree());
 
     let series = try!(stree.get_name("series").ok_or("Internal error: series did not contain \"series\""));
@@ -1993,7 +2002,8 @@ fn main() {
                     .arg_from_usage("-v, --reroll-count=[N] 'Mark the patch series as PATCH vN'")
                     .arg(Arg::from_usage("--rfc 'Use [RFC PATCH] instead of the standard [PATCH] prefix'").conflicts_with("subject-prefix"))
                     .arg_from_usage("--stdout 'Write patches to stdout rather than files'")
-                    .arg_from_usage("--subject-prefix [Subject-Prefix] 'Use [Subject-Prefix] instead of the standard [PATCH] prefix'"),
+                    .arg_from_usage("--subject-prefix [Subject-Prefix] 'Use [Subject-Prefix] instead of the standard [PATCH] prefix'")
+                    .arg_from_usage("[series] 'Use [series] instead of SHEAD'"),
                 SubCommand::with_name("log")
                     .about("Show the history of the patch series")
                     .arg_from_usage("-p, --patch 'Include a patch for each change committed to the series'"),
