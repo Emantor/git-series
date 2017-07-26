@@ -103,6 +103,18 @@ fn peel_to_commit(r: Reference) -> Result<Commit> {
     Ok(try!(try!(r.peel(ObjectType::Commit)).into_commit().map_err(|obj| format!("Internal error: expected a commit: {}", obj.id()))))
 }
 
+fn series_commit<'a>(repo: &'a Repository, m: &ArgMatches) -> Result<Commit<'a>> {
+    use git2::ErrorCode::NotFound;
+    let series_ref = m.value_of("series").map(|x| String::from("git-series/") + x)
+        .unwrap_or(String::from("SHEAD"));
+    peel_to_commit(
+        repo.find_reference(&series_ref)
+        .map_err(|e| if e.code() == NotFound { Error::NoActiveSeries } else { e.into() })?
+        .resolve()
+        .map_err(|e| if e.code() == NotFound { Error::UninitialisedSeries } else { e.into() })?
+    )
+}
+
 fn commit_obj_summarize_components(commit: &mut Commit) -> Result<(String, String)> {
     let short_id_buf = try!(commit.as_object().short_id());
     let short_id = short_id_buf.as_str().unwrap();
