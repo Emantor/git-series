@@ -1499,6 +1499,8 @@ fn format(out: &mut Output, repo: &Repository, m: &ArgMatches) -> Result<()> {
             |n| format!("{}{}v{}", subject_prefix, ensure_space(&subject_prefix), n));
     let file_prefix = version.map_or("".to_string(), |n| format!("v{}-", n));
 
+    let directory = m.value_of("output-directory").map_or("".to_string(), |x| format!("{}/", x));
+
     let num_width = commits.len().to_string().len();
 
     let signature = mail_signature();
@@ -1517,7 +1519,7 @@ fn format(out: &mut Output, repo: &Repository, m: &ArgMatches) -> Result<()> {
         Box::new(std::io::stdout())
     };
     let patch_file = |name: &str| -> Result<Box<IoWrite>> {
-        let name = format!("{}{}", file_prefix, name);
+        let name = format!("{}{}{}", directory, file_prefix, name);
         println!("{}", name);
         Ok(Box::new(try!(File::create(name))))
     };
@@ -2005,7 +2007,8 @@ fn main() {
                     .arg_from_usage("-v, --reroll-count=[N] 'Mark the patch series as PATCH vN'")
                     .arg(Arg::from_usage("--rfc 'Use [RFC PATCH] instead of the standard [PATCH] prefix'").conflicts_with("subject-prefix"))
                     .arg_from_usage("--stdout 'Write patches to stdout rather than files'")
-                    .arg_from_usage("--subject-prefix [Subject-Prefix] 'Use [Subject-Prefix] instead of the standard [PATCH] prefix'"),
+                    .arg_from_usage("--subject-prefix [Subject-Prefix] 'Use [Subject-Prefix] instead of the standard [PATCH] prefix'")
+                    .arg_from_usage("-o, --output-directory [Directory] 'Use [Directory] to store the resulting files, instead of the current working directory'"),
                 SubCommand::with_name("log")
                     .about("Show the history of the patch series")
                     .arg_from_usage("-p, --patch 'Include a patch for each change committed to the series'"),
