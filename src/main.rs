@@ -7,12 +7,13 @@ extern crate git2;
 extern crate isatty;
 extern crate munkres;
 #[macro_use]
-extern crate quick_error;
+extern crate failure;
 extern crate tempdir;
 
 use ansi_term::Style;
 use chrono::offset::TimeZone;
 use clap::{App, AppSettings, Arg, ArgGroup, ArgMatches, SubCommand};
+use failure::err_msg;
 use git2::{
     Commit, Config, Delta, Diff, Object, ObjectType, Oid, Reference, Repository, Tree, TreeBuilder,
 };
@@ -26,37 +27,17 @@ use std::io::Write as IoWrite;
 use std::process::Command;
 use tempdir::TempDir;
 
-quick_error! {
-    #[derive(Debug)]
-    enum Error {
-        Git2(err: git2::Error) {
-            from()
-            cause(err)
-            display("{}", err)
-        }
-        IO(err: std::io::Error) {
-            from()
-            cause(err)
-            display("{}", err)
-        }
-        Msg(msg: String) {
-            from()
-            from(s: &'static str) -> (s.to_string())
-            description(msg)
-            display("{}", msg)
-        }
-        Utf8Error(err: std::str::Utf8Error) {
-            from()
-            cause(err)
-            display("{}", err)
-        }
-        NoActiveSeries {}      // SHEAD (or the thing it references) doesn't exist
-        SeriesNotFound {}      // We tried to use a series which doesn't exist
-        UninitialisedSeries {} // The active series currently has no commits
-    }
+#[derive(Debug, Fail)]
+enum Error {
+    #[fail(display = "No active series")]
+    NoActiveSeries, // SHEAD (or the thing it references) doesn't exist
+    #[fail(display = "Series not found")]
+    SeriesNotFound, // We tried to use a series which doesn't exist
+    #[fail(display = "Uninitialised series")]
+    UninitialisedSeries, // The active series currently has no commits
 }
 
-type Result<T> = std::result::Result<T, Error>;
+type Result<T> = std::result::Result<T, failure::Error>;
 
 const COMMIT_MESSAGE_COMMENT: &str = "
 # Please enter the commit message for your changes. Lines starting
@@ -84,7 +65,7 @@ const REBASE_COMMENT: &str = "\
 # However, if you remove everything, the rebase will be aborted.
 ";
 const SCISSOR_LINE: &str = "\
-                                    # ------------------------ >8 ------------------------";
+                            # ------------------------ >8 ------------------------";
 const SCISSOR_COMMENT: &str = "\
 # Do not touch the line above.
 # Everything below will be removed.
@@ -109,13 +90,13 @@ fn zero_oid() -> Oid {
 fn peel_to_commit(r: Reference) -> Result<Commit> {
     Ok(r.peel(ObjectType::Commit)?
         .into_commit()
-        .map_err(|obj| format!("Internal error: expected a commit: {}", obj.id()))?)
+        .map_err(|obj| format_err!("Internal error: expected a commit: {}", obj.id()))?)
 }
 
 fn revparse_to_commit<'repo>(repo: &'repo Repository, revstr: &str) -> Result<Commit<'repo>> {
     Ok(repo.revparse_single(revstr)?
         .into_commit()
-        .map_err(|obj| format!("Internal error: expected a commit: {}", obj.id()))?)
+        .map_err(|obj| format_err!("Internal error: expected a commit: {}", obj.id()))?)
 }
 
 /// Find the commit corresponding to the series specified at the command line (as "[series]"), or
@@ -126,24 +107,24 @@ fn series_commit<'a>(repo: &'a Repository, m: &ArgMatches) -> Result<Commit<'a>>
         Some(x) => repo.find_reference(&(String::from("refs/heads/git-series/") + x))
             .map_err(|e| {
                 if e.code() == NotFound {
-                    Error::SeriesNotFound
+                    Error::SeriesNotFound.into()
                 } else {
-                    e.into()
+                    err_msg(e)
                 }
             })?,
         None => repo.find_reference("SHEAD").map_err(|e| {
             if e.code() == NotFound {
-                Error::NoActiveSeries
+                Error::NoActiveSeries.into()
             } else {
-                e.into()
+                err_msg(e)
             }
         })?,
     };
     peel_to_commit(series_ref.resolve().map_err(|e| {
         if e.code() == NotFound {
-            Error::UninitialisedSeries
+            Error::UninitialisedSeries.into()
         } else {
-            e.into()
+            err_msg(e)
         }
     })?)
 }
@@ -254,10 +235,12 @@ impl<'repo> Internals<'repo> {
         for prefix in &[SERIES_PREFIX, STAGED_PREFIX, WORKING_PREFIX] {
             let prefixed_source = format!("{}{}", prefix, source);
             if let Some(r) = notfound_to_none(repo.find_reference(&prefixed_source))? {
-                let oid = r.target().ok_or_else(|| format!(
-                    "Internal error: \"{}\" is a symbolic reference",
-                    prefixed_source
-                ))?;
+                let oid = r.target().ok_or_else(|| {
+                    format_err!(
+                        "Internal error: \"{}\" is a symbolic reference",
+                        prefixed_source
+                    )
+                })?;
                 let prefixed_dest = format!("{}{}", prefix, dest);
                 repo.reference(
                     &prefixed_dest,
@@ -363,7 +346,7 @@ fn unadd(repo: &Repository, m: &ArgMatches) -> Result<()> {
     let started = {
         let shead_target = shead
             .symbolic_target()
-            .ok_or("SHEAD not a symbolic reference")?;
+            .ok_or(err_msg("SHEAD not a symbolic reference"))?;
         notfound_to_none(repo.find_reference(shead_target))?.is_some()
     };
 
@@ -393,9 +376,9 @@ fn unadd(repo: &Repository, m: &ArgMatches) -> Result<()> {
 fn shead_series_name(shead: &Reference) -> Result<String> {
     let shead_target = shead
         .symbolic_target()
-        .ok_or("SHEAD not a symbolic reference")?;
+        .ok_or(err_msg("SHEAD not a symbolic reference"))?;
     if !shead_target.starts_with(SERIES_PREFIX) {
-        return Err(format!("SHEAD does not start with {}", SERIES_PREFIX).into());
+        return Err(format_err!("SHEAD does not start with {}", SERIES_PREFIX));
     }
     Ok(shead_target[SERIES_PREFIX.len()..].to_string())
 }
@@ -449,7 +432,7 @@ fn start(repo: &Repository, m: &ArgMatches) -> Result<()> {
 
     let name = m.value_of("name").unwrap();
     if Internals::exists(repo, name)? {
-        return Err(format!("Series {} already exists.\nUse checkout to resume working on an existing patch series.", name).into());
+        return Err(format_err!("Series {} already exists.\nUse checkout to resume working on an existing patch series.", name));
     }
     let prefixed_name = &[SERIES_PREFIX, name].concat();
     repo.reference_symbolic(
@@ -522,7 +505,7 @@ fn checkout_tree(repo: &Repository, treeish: &Object) -> Result<()> {
                 msg,
                 "Please, commit your changes or stash them before you switch series."
             ).unwrap();
-            return Err(msg.into());
+            return Err(err_msg(msg));
         }
         _ => result?,
     }
@@ -541,19 +524,22 @@ fn checkout(repo: &Repository, m: &ArgMatches) -> Result<()> {
     match repo.state() {
         git2::RepositoryState::Clean => (),
         s => {
-            return Err(format!("{:?} in progress; cannot checkout patch series", s).into());
+            return Err(format_err!(
+                "{:?} in progress; cannot checkout patch series",
+                s
+            ));
         }
     }
     let name = m.value_of("name").unwrap();
     if !Internals::exists(repo, name)? {
-        return Err(format!("Series {} does not exist.\nUse \"git series start <name>\" to start a new patch series.", name).into());
+        return Err(format_err!("Series {} does not exist.\nUse \"git series start <name>\" to start a new patch series.", name));
     }
 
     let internals = Internals::read_series(repo, name)?;
     let new_head_id = internals
         .working
         .get("series")?
-        .ok_or_else(|| format!("Could not find \"series\" in \"{}\"", name))?
+        .ok_or_else(|| format_err!("Could not find \"series\" in \"{}\"", name))?
         .id();
     let new_head = repo.find_commit(new_head_id)?.into_object();
 
@@ -604,7 +590,7 @@ fn base(repo: &Repository, m: &ArgMatches) -> Result<()> {
 
     if !m.is_present("delete") && !m.is_present("base") {
         if current_base_id.is_zero() {
-            return Err("Patch series has no base set".into());
+            return Err(err_msg("Patch series has no base set"));
         } else {
             println!("{}", current_base_id);
             return Ok(());
@@ -618,18 +604,17 @@ fn base(repo: &Repository, m: &ArgMatches) -> Result<()> {
         let base_object = repo.revparse_single(base)?;
         let base_commit = base_object.peel(ObjectType::Commit)?;
         let base_id = base_commit.id();
-        let s_working_series = internals
-            .working
-            .get("series")?
-            .ok_or("Could not find entry \"series\" in working vesion of current series")?;
+        let s_working_series = internals.working.get("series")?.ok_or(err_msg(
+            "Could not find entry \"series\" in working vesion of current series",
+        ))?;
         if base_id != s_working_series.id()
             && !repo.graph_descendant_of(s_working_series.id(), base_id)?
         {
-            return Err(format!(
+            return Err(format_err!(
                 "Cannot set base to {}: not an ancestor of the patch series {}",
                 base,
                 s_working_series.id()
-            ).into());
+            ));
         }
         base_id
     };
@@ -668,7 +653,7 @@ fn detach(repo: &Repository) -> Result<()> {
     match repo.find_reference(SHEAD_REF) {
         Ok(mut r) => r.delete()?,
         Err(_) => {
-            return Err("No current patch series to detach from.".into());
+            return Err(err_msg("No current patch series to detach from."));
         }
     }
     Ok(())
@@ -679,14 +664,17 @@ fn delete(repo: &Repository, m: &ArgMatches) -> Result<()> {
     if let Ok(shead) = repo.find_reference(SHEAD_REF) {
         let shead_target = shead_series_name(&shead)?;
         if shead_target == name {
-            return Err(format!(
+            return Err(format_err!(
                 "Cannot delete the current series \"{}\"; detach first.",
                 name
-            ).into());
+            ));
         }
     }
     if !Internals::delete(repo, name)? {
-        return Err(format!("Nothing to delete: series \"{}\" does not exist.", name).into());
+        return Err(format_err!(
+            "Nothing to delete: series \"{}\" does not exist.",
+            name
+        ));
     }
     Ok(())
 }
@@ -734,7 +722,7 @@ fn get_editor(config: &Config) -> Result<OsString> {
         return Ok(e);
     }
     if terminal_is_dumb {
-        return Err("TERM unset or \"dumb\" but EDITOR unset".into());
+        return Err(err_msg("TERM unset or \"dumb\" but EDITOR unset"));
     }
     Ok("vi".into())
 }
@@ -805,7 +793,7 @@ fn run_editor<S: AsRef<OsStr>>(config: &Config, filename: S) -> Result<()> {
     let editor = get_editor(&config)?;
     let editor_status = cmd_maybe_shell(editor, true).arg(&filename).status()?;
     if !editor_status.success() {
-        return Err(format!("Editor exited with status {}", editor_status).into());
+        return Err(format_err!("Editor exited with status {}", editor_status));
     }
     Ok(())
 }
@@ -863,8 +851,7 @@ impl Output {
             return Ok(Style::new());
         }
         if self.pager.is_some() {
-            let color_pager =
-                notfound_to_none(config.get_bool("color.pager"))?.unwrap_or(true);
+            let color_pager = notfound_to_none(config.get_bool("color.pager"))?.unwrap_or(true);
             if !color_pager {
                 return Ok(Style::new());
             }
@@ -873,7 +860,7 @@ impl Output {
         }
         let cfg = format!("color.{}.{}", command, slot);
         let color = notfound_to_none(config.get_str(&cfg))?.unwrap_or(default);
-        colorparse::parse(color).map_err(|e| format!("Error parsing {}: {}", cfg, e).into())
+        colorparse::parse(color).map_err(|e| format_err!("Error parsing {}: {}", cfg, e).into())
     }
 
     fn write_err(&mut self, msg: &str) {
@@ -920,16 +907,17 @@ fn get_signature(config: &Config, which: &str) -> Result<git2::Signature<'static
     let which_lc = which.to_lowercase();
     let name = env::var(&name_var).or_else(|_| {
         config.get_string("user.name").or_else(|_| {
-            Err(format!(
+            Err(format_err!(
                 "Could not determine {} name: checked ${} and user.name in git config",
-                which_lc, name_var
+                which_lc,
+                name_var
             ))
         })
     })?;
     let email = env::var(&email_var).or_else(|_| {
         config.get_string("user.email").or_else(|_| {
             env::var("EMAIL").or_else(|_| {
-                Err(format!("Could not determine {} email: checked ${}, user.email in git config, and $EMAIL", which_lc, email_var))
+                Err(format_err!("Could not determine {} email: checked ${}, user.email in git config, and $EMAIL", which_lc, email_var))
             })
         })
     })?;
@@ -1085,7 +1073,7 @@ fn commit_status(
         if do_status {
             write!(out, "{}", status)?;
         } else {
-            return Err(status.into());
+            return Err(err_msg(status));
         }
         return Ok(());
     }
@@ -1093,10 +1081,10 @@ fn commit_status(
     // Check that the commit includes the series
     let series_id = match tree.get_name("series") {
         None => {
-            return Err(concat!(
+            return Err(err_msg(concat!(
                 "Cannot commit: initial commit must include \"series\"\n",
                 "Use \"git series add series\" or \"git series commit -a\""
-            ).into());
+            )));
         }
         Some(series) => series.id(),
     };
@@ -1106,7 +1094,7 @@ fn commit_status(
         if base.id() != series_id && !repo.graph_descendant_of(series_id, base.id())? {
             let (base_short_id, base_summary) = commit_summarize_components(&repo, base.id())?;
             let (series_short_id, series_summary) = commit_summarize_components(&repo, series_id)?;
-            return Err(format!(
+            return Err(format_err!(
                 concat!(
                     "Cannot commit: base {} is not an ancestor of patch series {}\n",
                     "base   {} {}\n",
@@ -1118,7 +1106,7 @@ fn commit_status(
                 base_summary,
                 series_short_id,
                 series_summary
-            ).into());
+            ));
         }
     }
 
@@ -1157,7 +1145,9 @@ fn commit_status(
         }
     };
     if msg.is_empty() {
-        return Err("Aborting series commit due to empty commit message.".into());
+        return Err(err_msg(
+            "Aborting series commit due to empty commit message.",
+        ));
     }
 
     let author = get_signature(&config, "AUTHOR")?;
@@ -1209,7 +1199,7 @@ fn cover(repo: &Repository, m: &ArgMatches) -> Result<()> {
 
     if m.is_present("delete") {
         if working_cover_id.is_zero() {
-            return Err("No cover to delete".into());
+            return Err(err_msg("No cover to delete"));
         }
         internals.working.remove("cover")?;
         internals.write(repo)?;
@@ -1232,7 +1222,7 @@ fn cover(repo: &Repository, m: &ArgMatches) -> Result<()> {
     file.read_to_string(&mut msg)?;
     let msg = git2::message_prettify(msg, git2::DEFAULT_COMMENT_CHAR)?;
     if msg.is_empty() {
-        return Err("Empty cover letter; not changing.\n(To delete the cover letter, use \"git series cover -d\".)".into());
+        return Err(err_msg("Empty cover letter; not changing.\n(To delete the cover letter, use \"git series cover -d\".)"));
     }
 
     let new_cover_id = repo.blob(msg.as_bytes())?;
@@ -1259,14 +1249,20 @@ fn cp_mv(repo: &Repository, m: &ArgMatches, mv: bool) -> Result<()> {
     let dest = source_dest.next_back().unwrap();
     let (update_shead, source) = match source_dest.next_back().map(String::from) {
         Some(name) => (shead_target.as_ref() == Some(&name), name),
-        None => (true, shead_target.ok_or("No current series")?),
+        None => (true, shead_target.ok_or(err_msg("No current series"))?),
     };
 
     if Internals::exists(&repo, dest)? {
-        return Err(format!("The destination series \"{}\" already exists", dest).into());
+        return Err(format_err!(
+            "The destination series \"{}\" already exists",
+            dest
+        ));
     }
     if !Internals::copy(&repo, &source, &dest)? {
-        return Err(format!("The source series \"{}\" does not exist", source).into());
+        return Err(format_err!(
+            "The source series \"{}\" does not exist",
+            source
+        ));
     }
 
     if mv {
@@ -1852,10 +1848,10 @@ fn format(out: &mut Output, repo: &Repository, m: &ArgMatches) -> Result<()> {
 
     let series = stree
         .get_name("series")
-        .ok_or("Internal error: series did not contain \"series\"")?;
-    let base = stree
-        .get_name("base")
-        .ok_or("Cannot format series; no base set.\nUse \"git series base\" to set base.")?;
+        .ok_or(err_msg("Internal error: series did not contain \"series\""))?;
+    let base = stree.get_name("base").ok_or(err_msg(
+        "Cannot format series; no base set.\nUse \"git series base\" to set base.",
+    ))?;
 
     let mut revwalk = repo.revwalk()?;
     revwalk.set_sorting(git2::SORT_TOPOLOGICAL | git2::SORT_REVERSE);
@@ -1866,16 +1862,16 @@ fn format(out: &mut Output, repo: &Repository, m: &ArgMatches) -> Result<()> {
             let id = c?;
             let commit = repo.find_commit(id)?;
             if commit.parent_ids().count() > 1 {
-                return Err(format!(
+                return Err(format_err!(
                     "Error: cannot format merge commit as patch:\n{}",
                     commit_summarize(repo, id)?
-                ).into());
+                ));
             }
             Ok(commit)
         })
         .collect::<Result<_>>()?;
     if commits.is_empty() {
-        return Err("No patches to format; series and base identical.".into());
+        return Err(err_msg("No patches to format; series and base identical."));
     }
 
     let committer = get_signature(&config, "COMMITTER")?;
@@ -2153,10 +2149,10 @@ fn rebase(repo: &Repository, m: &ArgMatches) -> Result<()> {
         git2::RepositoryState::RebaseMerge
             if repo.path().join("rebase-merge").join("git-series").exists() =>
         {
-            return Err("git series rebase already in progress.\nUse \"git rebase --continue\" or \"git rebase --abort\".".into());
+            return Err(err_msg("git series rebase already in progress.\nUse \"git rebase --continue\" or \"git rebase --abort\"."));
         }
         s => {
-            return Err(format!("{:?} in progress; cannot rebase", s).into());
+            return Err(format_err!("{:?} in progress; cannot rebase", s));
         }
     }
 
@@ -2164,19 +2160,18 @@ fn rebase(repo: &Repository, m: &ArgMatches) -> Result<()> {
     let series = internals
         .working
         .get("series")?
-        .ok_or("Could not find entry \"series\" in working index")?;
-    let base = internals
-        .working
-        .get("base")?
-        .ok_or("Cannot rebase series; no base set.\nUse \"git series base\" to set base.")?;
+        .ok_or(err_msg("Could not find entry \"series\" in working index"))?;
+    let base = internals.working.get("base")?.ok_or(err_msg(
+        "Cannot rebase series; no base set.\nUse \"git series base\" to set base.",
+    ))?;
     if series.id() == base.id() {
-        return Err("No patches to rebase; series and base identical.".into());
+        return Err(err_msg("No patches to rebase; series and base identical."));
     } else if !repo.graph_descendant_of(series.id(), base.id())? {
-        return Err(format!(
+        return Err(format_err!(
             "Cannot rebase: current base {} not an ancestor of series {}",
             base.id(),
             series.id()
-        ).into());
+        ));
     }
 
     // Check for unstaged or uncommitted changes before attempting to rebase.
@@ -2200,7 +2195,7 @@ fn rebase(repo: &Repository, m: &ArgMatches) -> Result<()> {
         }
     }
     if !unclean.is_empty() {
-        return Err(unclean.into());
+        return Err(err_msg(unclean));
     }
 
     let mut revwalk = repo.revwalk()?;
@@ -2212,10 +2207,10 @@ fn rebase(repo: &Repository, m: &ArgMatches) -> Result<()> {
             let id = c?;
             let mut commit = repo.find_commit(id)?;
             if commit.parent_ids().count() > 1 {
-                return Err(format!(
+                return Err(format_err!(
                     "Error: cannot rebase merge commit:\n{}",
                     commit_obj_summarize(&mut commit)?
-                ).into());
+                ));
             }
             Ok(commit)
         })
@@ -2296,7 +2291,7 @@ fn rebase(repo: &Repository, m: &ArgMatches) -> Result<()> {
         file.read_to_string(&mut todo)?;
         let todo = git2::message_prettify(todo, git2::DEFAULT_COMMENT_CHAR)?;
         if todo.is_empty() {
-            return Err("Nothing to do".into());
+            return Err(err_msg("Nothing to do"));
         }
     }
 
@@ -2317,7 +2312,10 @@ fn rebase(repo: &Repository, m: &ArgMatches) -> Result<()> {
         .arg("--continue")
         .status()?;
     if !status.success() {
-        return Err(format!("git rebase --continue exited with status {}", status).into());
+        return Err(format_err!(
+            "git rebase --continue exited with status {}",
+            status
+        ));
     }
 
     Ok(())
@@ -2331,12 +2329,12 @@ fn req(out: &mut Output, repo: &Repository, m: &ArgMatches) -> Result<()> {
 
     let series = stree
         .get_name("series")
-        .ok_or("Internal error: series did not contain \"series\"")?;
+        .ok_or(err_msg("Internal error: series did not contain \"series\""))?;
     let series_id = series.id();
     let mut series_commit = repo.find_commit(series_id)?;
-    let base = stree
-        .get_name("base")
-        .ok_or("Cannot request pull; no base set.\nUse \"git series base\" to set base.")?;
+    let base = stree.get_name("base").ok_or(err_msg(
+        "Cannot request pull; no base set.\nUse \"git series base\" to set base.",
+    ))?;
     let mut base_commit = repo.find_commit(base.id())?;
 
     let (cover_content, subject, cover_body) = if let Some(entry) = stree.get_name("cover") {
@@ -2360,7 +2358,7 @@ fn req(out: &mut Output, repo: &Repository, m: &ArgMatches) -> Result<()> {
     let mut remote = repo.remote_anonymous(url)?;
     remote
         .connect(git2::Direction::Fetch)
-        .map_err(|e| format!("Could not connect to remote repository {}\n{}", url, e))?;
+        .map_err(|e| format_err!("Could not connect to remote repository {}\n{}", url, e))?;
     let remote_heads = remote.list()?;
 
     /* Find the requested name as either a tag or head */
@@ -2376,55 +2374,61 @@ fn req(out: &mut Output, repo: &Repository, m: &ArgMatches) -> Result<()> {
             opt_remote_head = Some(h.oid());
         }
     }
-    let (msg, extra_body, remote_pull_name) = match (
-        opt_remote_tag,
-        opt_remote_tag_peeled,
-        opt_remote_head,
-    ) {
-        (Some(remote_tag), Some(remote_tag_peeled), _) => {
-            if remote_tag_peeled != series_id {
-                return Err(
-                    format!("Remote tag {} does not refer to series {}", tag, series_id).into(),
-                );
+    let (msg, extra_body, remote_pull_name) =
+        match (opt_remote_tag, opt_remote_tag_peeled, opt_remote_head) {
+            (Some(remote_tag), Some(remote_tag_peeled), _) => {
+                if remote_tag_peeled != series_id {
+                    return Err(format_err!(
+                        "Remote tag {} does not refer to series {}",
+                        tag,
+                        series_id
+                    ));
+                }
+                let local_tag = repo.find_tag(remote_tag).map_err(|e| {
+                    format_err!(
+                        "Could not find remote tag {} ({}) in local repository: {}",
+                        tag,
+                        remote_tag,
+                        e
+                    )
+                })?;
+                let mut local_tag_msg = local_tag.message().unwrap().to_string();
+                if let Some(sig_index) = local_tag_msg.find("-----BEGIN PGP ") {
+                    local_tag_msg.truncate(sig_index);
+                }
+                let extra_body = match cover_content {
+                    Some(ref content) if !local_tag_msg.contains(content) => cover_body,
+                    _ => None,
+                };
+                (Some(local_tag_msg), extra_body, full_tag)
             }
-            let local_tag = repo.find_tag(remote_tag).map_err(|e| {
-                format!(
-                    "Could not find remote tag {} ({}) in local repository: {}",
-                    tag, remote_tag, e
-                )
-            })?;
-            let mut local_tag_msg = local_tag.message().unwrap().to_string();
-            if let Some(sig_index) = local_tag_msg.find("-----BEGIN PGP ") {
-                local_tag_msg.truncate(sig_index);
+            (Some(remote_tag), None, _) => {
+                if remote_tag != series_id {
+                    return Err(format_err!(
+                        "Remote unannotated tag {} does not refer to series {}",
+                        tag,
+                        series_id
+                    ));
+                }
+                (cover_content, None, full_tag)
             }
-            let extra_body = match cover_content {
-                Some(ref content) if !local_tag_msg.contains(content) => cover_body,
-                _ => None,
-            };
-            (Some(local_tag_msg), extra_body, full_tag)
-        }
-        (Some(remote_tag), None, _) => {
-            if remote_tag != series_id {
-                return Err(format!(
-                    "Remote unannotated tag {} does not refer to series {}",
-                    tag, series_id
-                ).into());
+            (_, _, Some(remote_head)) => {
+                if remote_head != series_id {
+                    return Err(format_err!(
+                        "Remote branch {} does not refer to series {}",
+                        tag,
+                        series_id
+                    ));
+                }
+                (cover_content, None, full_head)
             }
-            (cover_content, None, full_tag)
-        }
-        (_, _, Some(remote_head)) => {
-            if remote_head != series_id {
-                return Err(format!(
-                    "Remote branch {} does not refer to series {}",
-                    tag, series_id
-                ).into());
+            _ => {
+                return Err(format_err!(
+                    "Remote does not have either a tag or branch named {}",
+                    tag
+                ));
             }
-            (cover_content, None, full_head)
-        }
-        _ => {
-            return Err(format!("Remote does not have either a tag or branch named {}", tag).into())
-        }
-    };
+        };
 
     let commit_subject_date = |commit: &mut Commit| -> String {
         let date = date_822(commit.author().when());
@@ -2440,7 +2444,9 @@ fn req(out: &mut Output, repo: &Repository, m: &ArgMatches) -> Result<()> {
         .map(|c| Ok(repo.find_commit(c?)?))
         .collect::<Result<_>>()?;
     if commits.is_empty() {
-        return Err("No patches to request pull of; series and base identical.".into());
+        return Err(err_msg(
+            "No patches to request pull of; series and base identical.",
+        ));
     }
 
     let author = get_signature(&config, "AUTHOR")?;
