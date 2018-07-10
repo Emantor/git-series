@@ -58,15 +58,15 @@ quick_error! {
 
 type Result<T> = std::result::Result<T, Error>;
 
-const COMMIT_MESSAGE_COMMENT: &'static str = "
+const COMMIT_MESSAGE_COMMENT: &str = "
 # Please enter the commit message for your changes. Lines starting
 # with '#' will be ignored, and an empty message aborts the commit.
 ";
-const COVER_LETTER_COMMENT: &'static str = "
+const COVER_LETTER_COMMENT: &str = "
 # Please enter the cover letter for your changes. Lines starting
 # with '#' will be ignored, and an empty message aborts the change.
 ";
-const REBASE_COMMENT: &'static str = "\
+const REBASE_COMMENT: &str = "\
 #
 # Commands:
 # p, pick = use commit
@@ -83,22 +83,22 @@ const REBASE_COMMENT: &'static str = "\
 #
 # However, if you remove everything, the rebase will be aborted.
 ";
-const SCISSOR_LINE: &'static str = "\
+const SCISSOR_LINE: &str = "\
                                     # ------------------------ >8 ------------------------";
-const SCISSOR_COMMENT: &'static str = "\
+const SCISSOR_COMMENT: &str = "\
 # Do not touch the line above.
 # Everything below will be removed.
 ";
 
-const SHELL_METACHARS: &'static str = "|&;<>()$`\\\"' \t\n*?[#~=%";
+const SHELL_METACHARS: &str = "|&;<>()$`\\\"' \t\n*?[#~=%";
 
-const SERIES_PREFIX: &'static str = "refs/heads/git-series/";
-const SHEAD_REF: &'static str = "refs/SHEAD";
-const STAGED_PREFIX: &'static str = "refs/git-series-internals/staged/";
-const WORKING_PREFIX: &'static str = "refs/git-series-internals/working/";
+const SERIES_PREFIX: &str = "refs/heads/git-series/";
+const SHEAD_REF: &str = "refs/SHEAD";
+const STAGED_PREFIX: &str = "refs/git-series-internals/staged/";
+const WORKING_PREFIX: &str = "refs/git-series-internals/working/";
 
-const GIT_FILEMODE_BLOB: u32 = 0o100644;
-const GIT_FILEMODE_COMMIT: u32 = 0o160000;
+const GIT_FILEMODE_BLOB: u32 = 0o100_644; // Regular non-executable file
+const GIT_FILEMODE_COMMIT: u32 = 0o160_000; // Gitlink
 
 fn zero_oid() -> Oid {
     Oid::from_bytes(
@@ -239,7 +239,7 @@ impl<'repo> Internals<'repo> {
     }
 
     fn exists(repo: &'repo Repository, series_name: &str) -> Result<bool> {
-        for prefix in [SERIES_PREFIX, STAGED_PREFIX, WORKING_PREFIX].iter() {
+        for prefix in &[SERIES_PREFIX, STAGED_PREFIX, WORKING_PREFIX] {
             let prefixed_name = format!("{}{}", prefix, series_name);
             if notfound_to_none(repo.refname_to_id(&prefixed_name))?.is_some() {
                 return Ok(true);
@@ -251,10 +251,10 @@ impl<'repo> Internals<'repo> {
     // Returns true if it had anything to copy.
     fn copy(repo: &'repo Repository, source: &str, dest: &str) -> Result<bool> {
         let mut copied_any = false;
-        for prefix in [SERIES_PREFIX, STAGED_PREFIX, WORKING_PREFIX].iter() {
+        for prefix in &[SERIES_PREFIX, STAGED_PREFIX, WORKING_PREFIX] {
             let prefixed_source = format!("{}{}", prefix, source);
             if let Some(r) = notfound_to_none(repo.find_reference(&prefixed_source))? {
-                let oid = r.target().ok_or(format!(
+                let oid = r.target().ok_or_else(|| format!(
                     "Internal error: \"{}\" is a symbolic reference",
                     prefixed_source
                 ))?;
@@ -274,7 +274,7 @@ impl<'repo> Internals<'repo> {
     // Returns true if it had anything to delete.
     fn delete(repo: &'repo Repository, series_name: &str) -> Result<bool> {
         let mut deleted_any = false;
-        for prefix in [SERIES_PREFIX, STAGED_PREFIX, WORKING_PREFIX].iter() {
+        for prefix in &[SERIES_PREFIX, STAGED_PREFIX, WORKING_PREFIX] {
             let prefixed_name = format!("{}{}", prefix, series_name);
             if let Some(mut r) = notfound_to_none(repo.find_reference(&prefixed_name))? {
                 r.delete()?;
@@ -402,7 +402,7 @@ fn shead_series_name(shead: &Reference) -> Result<String> {
 
 fn series(out: &mut Output, repo: &Repository) -> Result<()> {
     let mut refs = Vec::new();
-    for prefix in [SERIES_PREFIX, STAGED_PREFIX, WORKING_PREFIX].iter() {
+    for prefix in &[SERIES_PREFIX, STAGED_PREFIX, WORKING_PREFIX] {
         let l = prefix.len();
         for r in repo.references_glob(&[prefix, "*"].concat())?.names() {
             refs.push(r?[l..].to_string());
@@ -421,7 +421,7 @@ fn series(out: &mut Output, repo: &Repository) -> Result<()> {
     out.auto_pager(&config, "branch", false)?;
     let color_current = out.get_color(&config, "branch", "current", "green")?;
     let color_plain = out.get_color(&config, "branch", "plain", "normal")?;
-    for name in refs.iter() {
+    for name in &refs {
         let (star, color) = if Some(name) == shead_target.as_ref() {
             ('*', color_current)
         } else {
@@ -526,7 +526,7 @@ fn checkout_tree(repo: &Repository, treeish: &Object) -> Result<()> {
         }
         _ => result?,
     }
-    println!("");
+    println!();
     if !dirty.is_empty() {
         let mut stderr = std::io::stderr();
         writeln!(stderr, "Files with changes unaffected by checkout:").unwrap();
@@ -553,7 +553,7 @@ fn checkout(repo: &Repository, m: &ArgMatches) -> Result<()> {
     let new_head_id = internals
         .working
         .get("series")?
-        .ok_or(format!("Could not find \"series\" in \"{}\"", name))?
+        .ok_or_else(|| format!("Could not find \"series\" in \"{}\"", name))?
         .id();
     let new_head = repo.find_commit(new_head_id)?.into_object();
 
@@ -736,7 +736,7 @@ fn get_editor(config: &Config) -> Result<OsString> {
     if terminal_is_dumb {
         return Err("TERM unset or \"dumb\" but EDITOR unset".into());
     }
-    return Ok("vi".into());
+    Ok("vi".into())
 }
 
 // Get the pager to use; with for_cmd set, get the pager for use by the
@@ -864,7 +864,7 @@ impl Output {
         }
         if self.pager.is_some() {
             let color_pager =
-                notfound_to_none(config.get_bool(&format!("color.pager")))?.unwrap_or(true);
+                notfound_to_none(config.get_bool("color.pager"))?.unwrap_or(true);
             if !color_pager {
                 return Ok(Style::new());
             }
@@ -879,10 +879,10 @@ impl Output {
     fn write_err(&mut self, msg: &str) {
         if self.include_stderr {
             if write!(self, "{}", msg).is_err() {
-                write!(std::io::stderr(), "{}", msg).unwrap();
+                eprint!("{}", msg);
             }
         } else {
-            write!(std::io::stderr(), "{}", msg).unwrap();
+            eprint!("{}", msg);
         }
     }
 }
@@ -892,7 +892,7 @@ impl Drop for Output {
         if let Some(ref mut child) = self.pager {
             let status = child.wait().unwrap();
             if !status.success() {
-                writeln!(std::io::stderr(), "Pager exited with status {}", status).unwrap();
+                eprintln!("Pager exited with status {}", status);
             }
         }
     }
@@ -1299,7 +1299,7 @@ fn shortlog(commits: &mut [Commit]) -> String {
         let author = commit.author().name().unwrap().to_string();
         author_map
             .entry(author)
-            .or_insert(Vec::new())
+            .or_insert_with(Vec::new)
             .push(commit.summary().unwrap().to_string());
     }
 
@@ -1310,9 +1310,9 @@ fn shortlog(commits: &mut [Commit]) -> String {
         if first {
             first = false;
         } else {
-            writeln!(s, "").unwrap();
+            writeln!(s).unwrap();
         }
-        let summaries = author_map.get(author).unwrap();
+        let summaries = &author_map[author];
         writeln!(s, "{} ({}):", author, summaries.len()).unwrap();
         for summary in summaries {
             writeln!(s, "  {}", summary).unwrap();
@@ -1339,10 +1339,8 @@ fn sanitize_summary(summary: &str) -> String {
             if !(prev_dot && c == '.') {
                 s.push(c);
             }
-        } else {
-            if !s.is_empty() {
-                need_space = true;
-            }
+        } else if !s.is_empty() {
+            need_space = true;
         }
         prev_dot = c == '.';
     }
@@ -1412,8 +1410,8 @@ impl DiffColors {
             frag: out.get_color(&config, "diff", "frag", "cyan")?,
             func: out.get_color(&config, "diff", "func", "normal")?,
             context: out.get_color(&config, "diff", "context", "normal")?,
-            old: old,
-            new: new,
+            old,
+            new,
             series_old: old.reverse(),
             series_new: new.reverse(),
         })
@@ -1454,7 +1452,7 @@ fn write_diff<W: IoWrite>(
             }
             if simplify {
                 if o == 'H' {
-                    v.push(normal.paint("@@\n".as_bytes()));
+                    v.push(normal.paint(b"@@\n" as &[u8]));
                     lines += 1;
                 } else if o == 'F' {
                     for line in l.content().split(|c| *c == b'\n') {
@@ -1463,7 +1461,7 @@ fn write_diff<W: IoWrite>(
                             && !line.starts_with(b"index ")
                         {
                             v.push(normal.paint(line.to_owned()));
-                            v.push(normal.paint("\n".as_bytes()));
+                            v.push(normal.paint(b"\n" as &[u8]));
                             lines += 1;
                         }
                     }
@@ -1487,17 +1485,17 @@ fn write_diff<W: IoWrite>(
                     (_, &c) if c == b'\n' => v.push(style.paint(&line[..line.len() - 1])),
                     (pos, _) => {
                         v.push(style.paint(&line[..pos - 1]));
-                        v.push(normal.paint(" ".as_bytes()));
+                        v.push(normal.paint(b" " as &[u8]));
                         v.push(colors.func.paint(&line[pos..line.len() - 1]));
                     }
                 }
-                v.push(normal.paint("\n".as_bytes()));
+                v.push(normal.paint(b"\n" as &[u8]));
             } else {
                 // The less pager resets ANSI colors at each newline, so emit colors separately for
                 // each line.
                 for (n, line) in l.content().split(|c| *c == b'\n').enumerate() {
                     if n != 0 {
-                        v.push(normal.paint("\n".as_bytes()));
+                        v.push(normal.paint(b"\n" as &[u8]));
                     }
                     if !line.is_empty() {
                         v.push(style.paint(line));
@@ -1640,7 +1638,7 @@ fn write_commit_range_diff<W: IoWrite>(
             }
             commits1_state_index += 1;
         }
-        if let &Some(i1) = opt_i1 {
+        if let Some(i1) = *opt_i1 {
             commit_pairs.push((Some(i1), Some(i2)));
             commits1_state[i1] = CommitState::Handled;
         } else {
@@ -1655,10 +1653,10 @@ fn write_commit_range_diff<W: IoWrite>(
 
     let normal = Style::new();
     let nl = |v: &mut Vec<_>| {
-        v.push(normal.paint("\n".as_bytes()));
+        v.push(normal.paint(b"\n" as &[u8]));
     };
     let mut v = Vec::new();
-    v.push(colors.meta.paint("diff --series".as_bytes()));
+    v.push(colors.meta.paint(b"diff --series" as &[u8]));
     nl(&mut v);
 
     let offset = ncommon + 1;
@@ -1981,7 +1979,7 @@ fn format(out: &mut Output, repo: &Repository, m: &ArgMatches) -> Result<()> {
     for (commit_num, commit) in commits.iter().enumerate() {
         let first_mail = commit_num == 0 && cover_entry.is_none();
         if to_stdout && !first_mail {
-            writeln!(out, "")?;
+            writeln!(out)?;
         }
 
         let message = commit.message().unwrap();
@@ -2103,7 +2101,7 @@ fn log(out: &mut Output, repo: &Repository, m: &ArgMatches) -> Result<()> {
         if first {
             first = false;
         } else {
-            writeln!(out, "")?;
+            writeln!(out)?;
         }
         let oid = oid?;
         let commit = repo.find_commit(oid)?;
@@ -2132,11 +2130,11 @@ fn log(out: &mut Output, repo: &Repository, m: &ArgMatches) -> Result<()> {
                 .take_while(|parent_id| tree.get_id(*parent_id).is_none())
                 .collect();
 
-            writeln!(out, "")?;
+            writeln!(out)?;
             if parent_ids.len() > 1 {
                 writeln!(out, "(Diffs of series merge commits not yet supported)")?;
             } else {
-                let parent_tree = if parent_ids.len() == 0 {
+                let parent_tree = if parent_ids.is_empty() {
                     None
                 } else {
                     Some(repo.find_commit(parent_ids[0])?.tree()?)
@@ -2234,7 +2232,7 @@ fn rebase(repo: &Repository, m: &ArgMatches) -> Result<()> {
         }
     };
 
-    let newbase = onto.unwrap_or(base.id());
+    let newbase = onto.unwrap_or_else(|| base.id());
     if newbase == base.id() && !interactive {
         println!("Nothing to do: base unchanged and not rebasing interactively");
         return Ok(());
