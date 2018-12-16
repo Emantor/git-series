@@ -112,7 +112,7 @@ fn series_commit<'a>(repo: &'a Repository, m: &ArgMatches) -> Result<Commit<'a>>
                     err_msg(e)
                 }
             })?,
-        None => repo.find_reference("SHEAD").map_err(|e| {
+        None => repo.find_reference(SHEAD_REF).map_err(|e| {
             if e.code() == NotFound {
                 Error::NoActiveSeries.into()
             } else {
