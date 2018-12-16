@@ -1211,10 +1211,28 @@ fn cover(repo: &Repository, m: &ArgMatches) -> Result<()> {
 
     let filename = repo.path().join("COVER_EDITMSG");
     let mut file = File::create(&filename)?;
+
+    let stree = series_commit(repo, m)?.tree()?;
+    let series = stree
+        .get_name("series")
+        .ok_or(err_msg("Internal error: series did not contain \"series\""))?;
+    let base = stree.get_name("base").ok_or(err_msg(
+        "Cannot format series; no base set.\nUse \"git series base\" to set base.",
+    ))?;
+    let series_tree = repo.find_commit(series.id())?.tree().unwrap();
+    let base_tree = repo.find_commit(base.id())?.tree().unwrap();
+    let diff = repo.diff_tree_to_tree(Some(&base_tree), Some(&series_tree), None)?;
+    let stats = diffstat(&diff)?;
     if working_cover_content.is_empty() {
         write!(file, "{}", COVER_LETTER_COMMENT)?;
+        for line in stats.lines() {
+            write!(file, "# {}\n", line)?;
+        }
     } else {
         write!(file, "{}", working_cover_content)?;
+        for line in stats.lines() {
+            write!(file, "# {}\n", line)?;
+        }
     }
     drop(file);
     let config = repo.config()?;
